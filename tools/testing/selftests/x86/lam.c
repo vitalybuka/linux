@@ -24,6 +24,7 @@
 /* LAM modes, these definitions were copied from kernel code */
 #define LAM_NONE                0
 #define LAM_U57_BITS            6
+#define LAM_U48_BITS            15
 /* arch prctl for LAM */
 #define ARCH_GET_UNTAG_MASK     0x4001
 #define ARCH_ENABLE_TAGGED_ADDR 0x4002
@@ -126,7 +127,7 @@ static int set_lam(unsigned long lam)
 	int ret = 0;
 	uint64_t ptr = 0;
 
-	if (lam != LAM_U57_BITS && lam != LAM_NONE)
+	if (lam != LAM_U48_BITS && lam != LAM_U57_BITS && lam != LAM_NONE)
 		return -1;
 
 	/* Skip check return */
@@ -138,6 +139,8 @@ static int set_lam(unsigned long lam)
 	/* Check mask returned is expected */
 	if (lam == LAM_U57_BITS)
 		ret = (ptr != ~(0x3fULL << 57));
+	else if (lam == LAM_U48_BITS)
+		ret = (ptr != ~(0x7fffULL << 48));
 	else if (lam == LAM_NONE)
 		ret = (ptr != -1ULL);
 
@@ -161,6 +164,8 @@ static int get_lam(void)
 		ret = LAM_U57_BITS;
 	else if (ptr == -1ULL)
 		ret = LAM_NONE;
+	else if (ptr == ~(0x7fffULL << 48))
+		ret = LAM_U48_BITS;
 
 
 	return ret;
@@ -176,6 +181,9 @@ static uint64_t get_metadata(uint64_t src, unsigned long lam)
 	metadata = rand();
 
 	switch (lam) {
+	case LAM_U48_BITS: /* Set metadata in bits 62:48 */
+		metadata = (src & ~(0x7fffULL << 48)) | ((metadata & 0x7fff) << 48);
+		break;
 	case LAM_U57_BITS: /* Set metadata in bits 62:57 */
 		metadata = (src & ~(0x3fULL << 57)) | ((metadata & 0x3f) << 57);
 		break;
@@ -552,6 +560,9 @@ out:
 			uint64_t addr = ((uint64_t)fi->iovecs[i].iov_base);
 
 			switch (lam) {
+			case LAM_U48_BITS: /* Clear bits 62:48 */
+				addr = (addr & ~(0x7fffULL << 48));
+				break;
 			case LAM_U57_BITS: /* Clear bits 62:57 */
 				addr = (addr & ~(0x3fULL << 57));
 				break;
@@ -697,6 +708,12 @@ static struct testcases uring_cases[] = {
 		.msg = "URING: LAM_U57. Dereferencing pointer with metadata\n",
 	},
 	{
+		.later = 0,
+		.lam = LAM_U48_BITS,
+		.test_func = handle_uring,
+		.msg = "URING: LAM_U48. Dereferencing pointer with metadata.\n",
+	},
+	{
 		.later = 1,
 		.expected = 1,
 		.lam = LAM_U57_BITS,
@@ -711,6 +728,12 @@ static struct testcases malloc_cases[] = {
 		.lam = LAM_U57_BITS,
 		.test_func = handle_malloc,
 		.msg = "MALLOC: LAM_U57. Dereferencing pointer with metadata\n",
+	},
+	{
+		.later = 0,
+		.lam = LAM_U48_BITS,
+		.test_func = handle_malloc,
+		.msg = "MALLOC: LAM_U48. Dereferencing pointer with metadata.\n",
 	},
 	{
 		.later = 1,
@@ -729,6 +752,12 @@ static struct testcases syscall_cases[] = {
 		.msg = "SYSCALL: LAM_U57. syscall with metadata\n",
 	},
 	{
+		.later = 0,
+		.lam = LAM_U48_BITS,
+		.test_func = handle_syscall,
+		.msg = "SYSCALL: LAM_U48. syscall with metadata\n",
+	},
+	{
 		.later = 1,
 		.expected = 1,
 		.lam = LAM_U57_BITS,
@@ -739,12 +768,28 @@ static struct testcases syscall_cases[] = {
 
 static struct testcases mmap_cases[] = {
 	{
+		.later = 0,
+		.expected = 2,
+		.lam = LAM_U48_BITS,
+		.addr = HIGH_ADDR,
+		.test_func = handle_mmap,
+		.msg = "MMAP: [Negtive] First LAM_U48, then High address.\n",
+	},
+	{
 		.later = 1,
 		.expected = 0,
 		.lam = LAM_U57_BITS,
 		.addr = HIGH_ADDR,
 		.test_func = handle_mmap,
 		.msg = "MMAP: First mmap high address, then set LAM_U57.\n",
+	},
+	{
+		.later = 1,
+		.expected = 1,
+		.lam = LAM_U48_BITS,
+		.addr = HIGH_ADDR,
+		.test_func = handle_mmap,
+		.msg = "MMAP: [Negtive] First mmap high address, then set LAM_U48.\n",
 	},
 	{
 		.later = 0,
@@ -762,6 +807,14 @@ static struct testcases mmap_cases[] = {
 		.test_func = handle_mmap,
 		.msg = "MMAP: First LAM_U57, then Low address.\n",
 	},
+	{
+		.later = 0,
+		.expected = 0,
+		.lam = LAM_U48_BITS,
+		.addr = LOW_ADDR,
+		.test_func = handle_mmap,
+		.msg = "MMAP: First LAM_U48, then low address.\n",
+	},
 };
 
 static struct testcases inheritance_cases[] = {
@@ -773,9 +826,21 @@ static struct testcases inheritance_cases[] = {
 	},
 	{
 		.expected = 0,
+		.lam = LAM_U48_BITS,
+		.test_func = handle_inheritance,
+		.msg = "FORK: LAM_U48, child process should get LAM mode same as parent\n",
+	},
+	{
+		.expected = 0,
 		.lam = LAM_U57_BITS,
 		.test_func = handle_execve,
 		.msg = "EXECVE: LAM_U57, child process should get disabled LAM mode\n",
+	},
+	{
+		.expected = 0,
+		.lam = LAM_U48_BITS,
+		.test_func = handle_execve,
+		.msg = "EXECVE: LAM_U48, child process should get disabled LAM mode\n",
 	},
 };
 
